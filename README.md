@@ -285,23 +285,6 @@ If you instead followed the manual backup steps above, use
 `private/flash-before.bin`. Restoring either backup overwrites the board's firmware.
 After manual location queries, run `scripts/logout.sh` to remove saved sessions.
 
-## Offline tests and publication
-
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-python3 scripts/export.py --check
-python3 scripts/export.py
-```
-
-The export is written to `dist/esp32-findmy-public.zip`. It includes only
-allowlisted source files. Account data, `.deps/`, `.venv/`, `.pio/`, logs, flash
-backups, and generated key headers are excluded independently of `.gitignore`.
-No universal tracker keys are provided.
-
-For GitHub, extract the **clean source ZIP** and publish its contents. Do not
-upload the directory of a working installation. Before committing changes,
-review `git diff --cached`. The export audit detects common credential patterns;
-it cannot guarantee that every future modification is free of private data.
 
 Read [Security](SECURITY.md) before sharing logs or troubleshooting data.
 
