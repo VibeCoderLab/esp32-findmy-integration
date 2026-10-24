@@ -21,7 +21,7 @@ into this source export.
 The experimental PCS writer follows the structures and wrapping behavior
 implemented/tested by the pinned MIT-licensed FindMy.py fork, calling its reader,
 KDF and field-encryption APIs for verification. Its upstream license is included
-as `patches/LICENSE.FindMy.py`. This does not imply upstream or Apple endorsement
+as `patches/LICENSE.FindMy.txt`. This does not imply upstream or Apple endorsement
 of newly generated envelopes.
 
 Additional protocol research used the PCS implementation in the
