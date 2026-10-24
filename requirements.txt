@@ -1,0 +1,4 @@
+FindMy @ git+https://github.com/parawanderer/FindMy.py@7969003ca785658369b650f75d9e7ca519566bf6
+Anisette==1.2.4
+pyserial==3.5
+bleak==3.0.2

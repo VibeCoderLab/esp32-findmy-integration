@@ -1,0 +1,34 @@
+diff --git a/auth_probe.py b/auth_probe.py
+index 8632183..015a1ff 100644
+--- a/auth_probe.py
++++ b/auth_probe.py
+@@ -355,6 +355,8 @@ async def authenticate(account, directory, client_info=None, sms=None, save_sess
+             # spent on the network and not on typing.
+             phones = [m for m in await account.get_2fa_methods() if isinstance(m, AsyncSmsSecondFactor)]
+             print("phone numbers:", [(i, m.phone_number) for i, m in enumerate(phones)], flush=True)
++            if not phones:
++                raise RuntimeError("Apple provides no SMS phone number for this account.")
+             method = phones[sms]
+             await method.request()
+             print(f"SMS requested for number {sms}.", flush=True)
+@@ -377,16 +379,16 @@ async def authenticate(account, directory, client_info=None, sms=None, save_sess
+             # No method.request(): Apple already pushed the prompt when "complete" returned hsc 409,
+             # and the extra td_2fa_request GET fails with 401 (seen 2026-10-14).
+             print("Apple has pushed a prompt to your other devices. Tap Allow, then enter the code.")
+-            print(f"[2fa] the machine is {_age(machine_state)} s old; the code must be accepted within about "
+-                  "40 s of provisioning, so type it as soon as you have it.", flush=True)
++            print("Enter the newly received code below. The emulator uses the real clock.", flush=True)
+             code = input("2FA code: ").strip()
+             await _resync_before_submit(resyncer, account)
+             state = await method.submit(code)
+         print("Login state:", state.name)
+         if state == LoginState.LOGGED_IN:
+             tokens = account._login_state_data.get("mobileme_data", {}).get("tokens", {})
+-            print("mobileme token names (no values):", sorted(tokens))
+-            await probe_fetch(account, client_info)
++            print("Find My permission available:", bool(tokens.get("searchPartyToken")))
++            if os.environ.get("FINDMY_DIAGNOSTICS") == "1":
++                await probe_fetch(account, client_info)
+             if save_session:
+                 # Only the Find My token and the dsid: enough to replay acsnservice, nothing more.
+                 path = Path(save_session)

@@ -1,0 +1,12 @@
+diff --git a/tools/machoadi/cooldown.py b/tools/machoadi/cooldown.py
+--- a/tools/machoadi/cooldown.py
++++ b/tools/machoadi/cooldown.py
+@@ -17,7 +17,7 @@ import time
+ from pathlib import Path
+ 
+ MARKER = Path("/tmp/macadi/gsa-429")
+-COOLDOWN_MINUTES = 45  # shorter than Apple's own "an hour" advice; chosen by the user.
++COOLDOWN_MINUTES = 5  # Local retry guard; Apple's actual rate-limit duration is unknown.
+ 
+ 
+ class Throttled(RuntimeError):
