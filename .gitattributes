@@ -1,0 +1,7 @@
+* text=auto eol=lf
+/private export-ignore
+/.deps export-ignore
+/.venv export-ignore
+/dist export-ignore
+/firmware/.pio export-ignore
+/firmware/include/device_secrets.h export-ignore

@@ -1,0 +1,20 @@
+# Credentials, trackers, machine identities and encrypted account backups
+/private/
+/.deps/
+/.venv/
+/dist/
+/firmware/.pio/
+/firmware/include/device_secrets.h
+__pycache__/
+*.pyc
+*.log
+*.bin
+*.elf
+*.map
+.env
+.env.*
+mac-state*/
+*session*.json
+*login*.json
+*.private.json
+*.pb
