@@ -1,0 +1,198 @@
+--- a/tools/machoadi/mac_anisette.py
++++ b/tools/machoadi/mac_anisette.py
+@@ -34,6 +34,8 @@
+ from pathlib import Path
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parent))
++
++from atomic_state import atomic_write, lock_state, save_store
+ 
+ from adi_run import CoreADI  # noqa: E402
+ from gsa import GSA, Device, GSAError  # noqa: E402
+@@ -91,11 +93,25 @@
+         self.state.mkdir(parents=True, exist_ok=True)
+         self.log = log
+ 
+-        self.identity = self._load_identity()
+-        self.adi = CoreADI(log=log)
+-        self.adi.stubs.hostuuid = bytes.fromhex(self.identity["host_uuid"])
+-        self._load_store()
+-        self._initialized = False
++        self._state_lock = lock_state(self.state)
++        try:
++            self.identity = self._load_identity()
++            self.adi = CoreADI(log=log)
++            self.adi.stubs.hostuuid = bytes.fromhex(self.identity["host_uuid"])
++            self._load_store()
++            self._initialized = False
++        except BaseException:
++            self._state_lock.close()
++            raise
++
++    def close(self) -> None:
++        self._state_lock.close()
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *_):
++        self.close()
+ 
+     def _ensure_initialized(self) -> None:
+         """Call the library's ``Initialize`` once, the way ``akd`` does at startup."""
+@@ -111,7 +127,7 @@
+         return _mint_identity()
+ 
+     def _save_identity(self) -> None:
+-        (self.state / "identity.json").write_text(json.dumps(self.identity, indent=2) + "\n")
++        atomic_write(self.state / "identity.json", (json.dumps(self.identity, indent=2) + "\n").encode())
+ 
+     # -- store ------------------------------------------------------------
+     def _load_store(self) -> None:
+@@ -131,11 +147,10 @@
+             self.adi.stubs.files[f"{STORE_DIR}/{blob.name}"] = bytearray(blob.read_bytes())
+ 
+     def _save_store(self) -> None:
+-        out = self.state / "store"
+-        out.mkdir(exist_ok=True)
+-        for name, data in self.adi.stubs.files.items():
+-            if name.startswith(STORE_DIR + "/"):
+-                (out / name.rsplit("/", 1)[1]).write_bytes(bytes(data))
++        files = {name.rsplit("/", 1)[1]: bytes(data)
++                 for name, data in self.adi.stubs.files.items()
++                 if name.startswith(STORE_DIR + "/")}
++        save_store(self.state, files)
+ 
+     # -- operations -------------------------------------------------------
+     def is_provisioned(self) -> bool:
+--- a/tools/machoadi/resync.py
++++ b/tools/machoadi/resync.py
+@@ -87,9 +87,12 @@
+         self.requests = 0
+         self.on_synced = on_synced
+         self._log = log or (lambda row: print(json.dumps(row), flush=True))
+-        self.machine = MacAnisette(self.state)
+-        CONTEXT["host_uuid"] = self.machine.identity["host_uuid"]
+-        self.client_info = self.machine.identity["client_info"]
++        # Do not hold a machine lock while the login's provider opens its own
++        # header subprocess. Reload the latest store under a scoped lock per use.
++        with MacAnisette(self.state) as machine:
++            CONTEXT["host_uuid"] = machine.identity["host_uuid"]
++            self.client_info = machine.identity["client_info"]
++        self.machine = None
+         self.gsa = GSA(Device(self.identity["device_id"], self.client_info,
+                               self.identity["local_user_uuid"], self.identity.get("serial")))
+         self._urlbag_loaded = False  # loaded on first use: it is an Apple request that most runs never need
+@@ -115,7 +118,8 @@
+         import srp._pysrp as srp  # noqa: PLC0415 - same SRP start gsa_init.py uses
+ 
+         self._spend()
+-        headers = self.machine.headers()  # a new OTP every request: it is only good for 30 s
++        with MacAnisette(self.state) as machine:
++            headers = machine.headers()  # fresh store and OTP, lock released before HTTP
+         provider = StaticAnisetteProvider(headers, self.client_info, serial=CLIENT_SERIAL,
+                                           identity=CLIENT_IDENTITY)
+         account = AsyncAppleAccount(provider, timeout=30)
+@@ -182,19 +186,25 @@
+ 
+     async def answer_sim(self, sim_b64: str) -> dict:
+         """Synchronize + POST for a SIM already in hand (from any 434 answer). Returns the sync verdict."""
+-        done = self.synchronize(sim_b64)
+-        if done["ret"] != 0:
+-            self.log("synchronize", ret=done["ret"])
+-            return {"ok": False}
+-        self.log("synchronize", ret=0, srm_len=len(done["srm"]))
+-        verdict = self.sync_machine(done["mid"], done["srm"])
+-        self.log("syncMachine", **verdict)
+-        ok = verdict.get("ec") == 0
+-        if ok:
+-            self.last_sync = time.time()
+-            if self.on_synced:
+-                self.on_synced()
+-        return {"ok": ok, **verdict}
++        with MacAnisette(self.state) as machine:
++            self.machine = machine
++            try:
++                machine._ensure_initialized()
++                done = self.synchronize(sim_b64)
++                if done["ret"] != 0:
++                    self.log("synchronize", ret=done["ret"])
++                    return {"ok": False}
++                self.log("synchronize", ret=0, srm_len=len(done["srm"]))
++                verdict = self.sync_machine(done["mid"], done["srm"])
++                self.log("syncMachine", **verdict)
++                ok = verdict.get("ec") == 0
++                if ok:
++                    self.last_sync = time.time()
++                    if self.on_synced:
++                        self.on_synced()
++                return {"ok": ok, **verdict}
++            finally:
++                self.machine = None
+ 
+     async def ensure_fresh(self) -> str:
+         """Make the machine accepted now. Returns 'accepted' (nothing needed), 'revived',
+--- /dev/null
++++ b/tools/machoadi/atomic_state.py
+@@ -0,0 +1,61 @@
++"""Durable private state writes and fail-closed multi-file ADI persistence."""
++import fcntl
++import os
++from pathlib import Path
++import tempfile
++
++
++def fsync_directory(path):
++    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
++    try:
++        os.fsync(descriptor)
++    finally:
++        os.close(descriptor)
++
++
++def atomic_write(path, data):
++    path = Path(path)
++    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix='.state-', suffix='.tmp')
++    try:
++        with os.fdopen(descriptor, 'wb') as stream:
++            stream.write(data)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(name, path)
++        fsync_directory(path.parent)
++    finally:
++        Path(name).unlink(missing_ok=True)
++
++
++def lock_state(state):
++    state = Path(state)
++    state.mkdir(parents=True, mode=0o700, exist_ok=True)
++    descriptor = os.open(state / '.machine.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
++    lock = os.fdopen(descriptor, 'r+')
++    try:
++        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        if (state / '.store-update.pending').exists():
++            raise RuntimeError('An ADI store update was interrupted. Preserve the whole machine state for review; do not erase the marker or regenerate automatically.')
++    except BaseException:
++        lock.close()
++        raise
++    return lock
++
++
++def save_store(state, files):
++    state = Path(state)
++    output = state / 'store'
++    if output.is_symlink():
++        raise RuntimeError('ADI store must not be a symbolic link.')
++    output.mkdir(mode=0o700, exist_ok=True)
++    if any(not name or Path(name).name != name or name in ('.', '..') for name in files):
++        raise ValueError('Invalid ADI state filename.')
++    pending = state / '.store-update.pending'
++    atomic_write(pending, b'ADI store commit in progress; preserve state if interrupted.\n')
++    # Individual blobs are atomic. The durable marker prevents reuse of a mixed
++    # generation after interruption; never rewind OTP counters automatically.
++    for name, data in files.items():
++        atomic_write(output / name, bytes(data))
++    fsync_directory(output)
++    pending.unlink()
++    fsync_directory(state)

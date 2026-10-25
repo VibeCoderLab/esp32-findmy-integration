@@ -12,6 +12,8 @@ import time
 
 from common import ROOT, STATE, private_directory, write_json, WorkflowError
 from logout import logout
+from snapshot import complete_records
+from service_limits import guard
 
 
 def run(command, **kwargs):
@@ -32,7 +34,7 @@ def parse_chip(output):
 
 
 def inspect_board(port):
-    result = subprocess.run(['uvx', '--from', 'esptool==5.6.0', 'esptool', '--port', port, 'flash-id'],
+    result = subprocess.run([ROOT / '.venv/bin/python', '-m', 'esptool', '--port', port, 'flash-id'],
         cwd=ROOT, check=True, capture_output=True, text=True)
     (STATE / 'installer-chip.log').write_text(result.stdout + result.stderr)
     return parse_chip(result.stdout + result.stderr)
@@ -65,7 +67,7 @@ def ensure_backup(board, port):
         pending.unlink(missing_ok=True)
         try:
             print(f'Reading flash backup at {baud} baud.', flush=True)
-            run(['uvx', '--from', 'esptool==5.6.0', 'esptool', '--port', port, '--baud', str(baud),
+            run([ROOT / '.venv/bin/python', '-m', 'esptool', '--port', port, '--baud', str(baud),
                  'read-flash', '0', hex(board['flash_bytes']), pending])
             break
         except subprocess.CalledProcessError:
@@ -102,7 +104,7 @@ async def validate_existing_registration():
     value = account()
     store = AsyncBeaconStore(cloud_account(value))
     try:
-        current = {record.name: record for record in await store.fetch_records()}
+        current = {record.name: record for record in await complete_records(store)}
         for record in expected:
             ident = record.record_identifier.value.name
             if ident not in current or not allowed_removal(record, current[ident].source):
@@ -114,6 +116,12 @@ async def validate_existing_registration():
 
 def install(args):
     private_directory()
+    manifest_path = STATE / 'registration.json'
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+    action = registration_action(manifest, args.fresh_protection)
+    if action == 'prepare' and (STATE / 'recovery-blocked.json').exists():
+        raise WorkflowError('Recovery is blocked. Review register.sh recovery-status before signing in again.')
+    guard('keychain' if action == 'prepare' else 'cloudkit')
     journal = STATE / 'installer-progress.json'
     def stage(name):
         write_json(journal, {'stage': name, 'port': args.port})
@@ -127,9 +135,6 @@ def install(args):
         run([ROOT / 'scripts/login.sh'])
     else:
         print('Using the saved login from this installation directory.', flush=True)
-    manifest_path = STATE / 'registration.json'
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
-    action = registration_action(manifest, args.fresh_protection)
     if action == 'prepare':
         stage('Prepare new keys and cloud records locally')
         command = [ROOT / 'scripts/register.sh', 'prepare', '--name', args.name, '--emoji', args.emoji]
@@ -147,7 +152,7 @@ def install(args):
     stage('Recheck USB device identity and upload firmware')
     check_same_board(board, inspect_board(args.port))
     time.sleep(2)
-    run(['uvx', '--from', 'platformio==6.2.0', 'pio', 'run', '-d', ROOT / 'firmware',
+    run([ROOT / '.venv/bin/python', '-m', 'platformio', 'run', '-d', ROOT / 'firmware',
          '--target', 'upload', '--upload-port', args.port])
     stage('Verify firmware keys on the board')
     command = [sys.executable, ROOT / 'host/verify.py', '--port', args.port]

@@ -3,9 +3,13 @@ import argparse
 import asyncio
 import getpass
 import json
+from datetime import datetime, timezone
 
-from common import STATE, account, cloud_account, private_directory, write_json, WorkflowError
+from common import STATE, account, cloud_account, private_directory, write_json, durable_unlink, WorkflowError
 from cloud import apply, digest, load, remove
+from snapshot import complete_records
+from service_limits import guard, request
+from recovery_status import safe_details, summary, release_retry
 from records import make_identity, build_record, check_candidate
 from findmy.cloudkit import AsyncBeaconStore
 from findmy.cloudkit.pcs import ShareProtection, unwrap_protection
@@ -22,11 +26,12 @@ async def prepare(name, emoji, fresh_protection=True):
         raise SystemExit('Recovery is blocked. Check the cause; no automatic retries.')
     value = account()
     session = store = None
-    value._password = getpass.getpass('Apple password (not saved): ')
     try:
+        guard('keychain')
+        value._password = getpass.getpass('Apple password (not saved): ')
         wrapped = cloud_account(value)
-        session = await AsyncKeychainSession.open(wrapped)
-        options = list((await session.recovery_options()).recoverable)
+        session = await request('keychain', lambda: AsyncKeychainSession.open(wrapped))
+        options = list((await request('keychain', lambda: session.recovery_options())).recoverable)
         if not options:
             raise WorkflowError('No recoverable device identity available.')
         for index, record in enumerate(options):
@@ -36,20 +41,31 @@ async def prepare(name, emoji, fresh_protection=True):
             raise WorkflowError('Invalid selection; no passcode attempt made.')
         code = getpass.getpass('Device screen unlock passcode (one attempt): ')
         try:
-            peer = await session.recover(options[int(choice)], code)
-        except Exception:
-            write_json(STATE / 'recovery-blocked.json', {'reason': 'recovery failed', 'automatic_retries': False})
-            raise WorkflowError('Recovery failed. No further attempt; check the cause.') from None
+            # Checkpoint BEFORE sending: crashes/cancellation leave an unknown-outcome block.
+            write_json(STATE / 'recovery-blocked.json', {
+                'reason': 'recovery attempt pending; outcome unknown', 'automatic_retries': False,
+                'started_at': datetime.now(timezone.utc).isoformat()})
+            try:
+                peer = await request('keychain', lambda: session.recover(options[int(choice)], code))
+            except BaseException as error:
+                failure = {'reason': 'recovery failed' if isinstance(error, Exception) else 'recovery interrupted; outcome unknown',
+                           'automatic_retries': False, 'details': safe_details(error)}
+                write_json(STATE / 'recovery-blocked.json', failure)
+                if not isinstance(error, Exception):
+                    raise
+                raise WorkflowError('Recovery failed. ' + summary(failure) +
+                    '\nNo automatic retry. Use recovery-status before explicitly releasing one manual retry.') from None
+            else:
+                durable_unlink(STATE / 'recovery-blocked.json')
         finally:
             del code
-        service_keys = await session.pcs_keys(peer)
+        service_keys = await request('keychain', lambda: session.pcs_keys(peer))
         store = AsyncBeaconStore(wrapped)
-        zone_keys = await store.zone_keys(service_keys)
-        existing = await store.fetch_records()
+        existing = await complete_records(store)
         identity = make_identity(name, emoji)
         if fresh_protection:
             from fresh_protection import build_fresh_records
-            zones = await store.client.zone_retrieve()
+            zones = await request('cloudkit', lambda: store.client.zone_retrieve())
             zone = next((z.target_zone for z in zones
                 if z.target_zone.zone_identifier.value.name == 'BeaconStore'), None)
             if zone is None:
@@ -63,6 +79,7 @@ async def prepare(name, emoji, fresh_protection=True):
             print('Experimental: fresh PCS envelopes generated; no accessory encryption templates used.')
             print('Zone identity, HMAC, inner/outer signatures and decryption verified; check visibility in Find My.')
         else:
+            zone_keys = await request('cloudkit', lambda: store.zone_keys(service_keys))
             templates = {}
             for kind in ('MasterBeaconRecord', 'BeaconNamingRecord'):
                 for record in existing:
@@ -103,6 +120,20 @@ async def prepare(name, emoji, fresh_protection=True):
         await value.close()
 
 async def run(args):
+    if args.mode in ('recovery-status', 'allow-recovery-retry'):
+        private_directory()
+        marker = STATE / 'recovery-blocked.json'
+        if args.mode == 'allow-recovery-retry':
+            if not args.confirm_one_recovery_retry:
+                raise WorkflowError('Explicit --confirm-one-recovery-retry is required. No Apple request sent.')
+            release_retry(STATE)
+            print('One manual retry released locally; prior failure archived. No Apple request sent.')
+        elif marker.is_file():
+            print(summary(json.loads(marker.read_text())))
+            print('Recovery remains blocked. Verify the selected device and its unlock passcode before authorizing one manual retry.')
+        else:
+            print('No blocked recovery attempt recorded.')
+        return
     if args.mode == 'prepare':
         return await prepare(args.name, args.emoji, args.fresh_protection)
     private_directory()
@@ -113,8 +144,11 @@ async def run(args):
         elif args.mode == 'remove': await remove(store)
         else:
             manifest, _ = load()
-            current = {r.name for r in await store.fetch_records()}
+            current = {r.name for r in await complete_records(store)}
             print('Journal:', manifest['status'])
+            for field in ('primary_error', 'cleanup_error'):
+                if field in manifest:
+                    print(field + ':', json.dumps(manifest[field], sort_keys=True))
             print('Records belonging to this installation present:', len(current & set(manifest['ids'])), '/ 2')
     finally:
         await store.close()
@@ -122,7 +156,8 @@ async def run(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('prepare', 'apply', 'status', 'remove'))
+    parser.add_argument('mode', choices=('prepare', 'apply', 'status', 'remove', 'recovery-status', 'allow-recovery-retry'))
+    parser.add_argument('--confirm-one-recovery-retry', action='store_true', help='Release one local recovery block after reviewing it; sends no request.')
     parser.add_argument('--name', default='ESP32 Tracker')
     parser.add_argument('--emoji', default='📍')
     protection = parser.add_mutually_exclusive_group()

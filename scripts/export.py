@@ -7,7 +7,7 @@ import re
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PATTERNS = ('README.md', 'README.de.md', 'LICENSE', 'SECURITY.md', 'THIRD_PARTY.md', 'requirements.txt',
+PATTERNS = ('VERSION', 'CHANGELOG.md', 'README.md', 'README.de.md', 'LICENSE', 'SECURITY.md', 'THIRD_PARTY.md', 'requirements.txt', 'requirements.lock', 'requirements-build.txt', 'requirements-build.lock', 'sources.lock.json',
     '.gitignore', '.gitattributes', 'host/*.py', 'scripts/*.py', 'scripts/*.sh',
     'tests/*.py', 'docs/*.md', 'patches/*.patch', 'patches/LICENSE.*',
     'firmware/platformio.ini', 'firmware/src/*.cpp', 'firmware/include/.gitkeep')

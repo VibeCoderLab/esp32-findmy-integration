@@ -1,5 +1,7 @@
 # ESP32 Find My — experimental tracker for Linux
 
+Version **0.1.1**. See [changes](CHANGELOG.md) and [release notes](docs/RELEASE-v0.1.1.md).
+
 Project prompts, progress messages and errors are in English, independent of the system language. External tools may use their own language settings.
 
 [Deutsch](README.de.md)
@@ -103,12 +105,19 @@ The setup script downloads a pinned revision of
 [os-findmy-e](https://github.com/sacca97/os-findmy-e), installs the Python
 requirements into `.venv/`, and uses the upstream downloader to obtain CoreADI
 from Apple's iTunes download. The downloader verifies its SHA-256 checksum.
-Apple's libraries are **not distributed with this project**. The patches in
-`patches/` adjust login diagnostic output and set the local HTTP-429 cooldown
-to five minutes. There is no automatic login retry; Apple's actual rate-limit
-duration may differ.
+Apple's libraries are **not distributed with this project**. The Python 3.12 runtime and build dependencies are installed from hash-locked
+files. FindMy is built from the separately hash-verified pinned source with
+reviewed packaging and HTTP-status patches. Machine state uses locked, atomic
+writes. See [dependency provenance](THIRD_PARTY.md).
 
-By default, **all account data is stored in `private/`**. To use another private
+GSA login and CloudKit/keychain/report requests have local rate-limit guards.
+The fallback pause is five minutes; usable server retry intervals take precedence.
+No automatic login retry occurs. Pause metadata is stored outside the project in
+`$XDG_STATE_HOME/esp32-findmy` (normally `~/.local/state/esp32-findmy`), so opening
+another extraction does not bypass a recorded service pause. Apple's actual
+rate-limit duration may differ.
+
+By default, **account credentials, tracker state and journals are stored in `private/`**. To use another private
 location, set `ESP32_FINDMY_STATE` to the same directory before every command.
 The project's `.gitignore` cannot protect an arbitrary external directory;
 never copy that directory into a repository.
@@ -145,8 +154,9 @@ This step asks for the Apple account password again to obtain a fresh recovery
 token. The password is kept only in memory. Select your own device and enter
 its **screen-unlock passcode** — not an SMS code or SIM PIN.
 
-There is one recovery attempt and no automatic passcode retry. A failed attempt
-creates `private/recovery-blocked.json` to prevent further automatic attempts.
+There is one recovery attempt and no automatic passcode retry. A marker is written to `private/recovery-blocked.json` **before** the recovery
+request. A failed or interrupted attempt leaves it in place, preventing another
+request until explicitly reviewed.
 See [Troubleshooting](docs/TROUBLESHOOTING.md) before trying again.
 
 The recovery flow reads the keychain without adding a new member to its trust
@@ -173,8 +183,11 @@ scripts/register.sh status
 `apply` creates only the two new record IDs recorded in the local journal and
 then fetches them again to verify the result. It does not write existing
 records. If creation fails partway through, the tool attempts to remove its own
-partially created pair. The journal remains available for a later targeted
-removal.
+partially created pair. On 401 or 429 it stops without another remote cleanup
+request. Incomplete cleanup is recorded as `cleanup_pending`; keep the journal,
+resolve the service/session issue, then run `scripts/register.sh remove` manually.
+Complete snapshots are required for verification; partial results cannot confirm
+creation or absence. See [failure recovery](docs/TROUBLESHOOTING.md).
 
 Reopen Find My on your iPhone or iPad and look for the new item under **Items**.
 The AirTag profile is intended to allow editing its name and emoji, but the
@@ -194,11 +207,11 @@ start a new login session. On many Linux distributions, that group is called
 `dialout`. Check the board and flash size before proceeding:
 
 ```bash
-uvx --from esptool==5.6.0 esptool --port /dev/ttyUSB0 flash-id
+.venv/bin/python -m esptool --port /dev/ttyUSB0 flash-id
 umask 077
 mkdir -p private
 chmod 700 private
-uvx --from esptool==5.6.0 esptool --port /dev/ttyUSB0 --baud 460800 read-flash 0 0x400000 private/flash-before.bin
+.venv/bin/python -m esptool --port /dev/ttyUSB0 --baud 460800 read-flash 0 0x400000 private/flash-before.bin
 ```
 
 Replace `/dev/ttyUSB0` with your board's port. `0x400000` is the size of the
@@ -278,7 +291,7 @@ To restore the original backup made by the one-command installer (replace
 the port with the correct board's port):
 
 ```bash
-uvx --from esptool==5.6.0 esptool --port /dev/ttyUSB0 --baud 460800 write-flash 0 private/installer-flash-before.bin
+.venv/bin/python -m esptool --port /dev/ttyUSB0 --baud 460800 write-flash 0 private/installer-flash-before.bin
 ```
 
 If you instead followed the manual backup steps above, use
@@ -286,7 +299,8 @@ If you instead followed the manual backup steps above, use
 After manual location queries, run `scripts/logout.sh` to remove saved sessions.
 
 
-Read [Security](SECURITY.md) before sharing logs or troubleshooting data.
+Read [Security](SECURITY.md) before handling account credentials or sharing logs.
+The [functional test plan](docs/FUNCTIONAL-TEST.md) covers validation of local changes.
 
 ## License and credits
 

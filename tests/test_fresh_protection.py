@@ -149,6 +149,7 @@ class FreshProtectionTests(unittest.TestCase):
                  patch.object(register, 'AsyncBeaconStore', return_value=store), \
                  patch.object(register, 'unwrap_protection', return_value=SimpleNamespace(private_keys=keys)), \
                  patch.object(register, 'select_zone_identity', return_value=keys[0]) as select_identity, \
+                 patch.object(register, 'complete_records', new=AsyncMock(return_value=[])), \
                  patch.object(register.getpass, 'getpass', return_value='synthetic'), patch('builtins.input', return_value='0'):
                 asyncio.run(register.prepare('Synthetic tracker', '🧪'))
             import json

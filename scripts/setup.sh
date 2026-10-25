@@ -13,7 +13,7 @@ if [[ ! -d .deps/os-findmy-e ]]; then
   git -C .deps/os-findmy-e checkout --detach "$UPSTREAM_REV"
 fi
 [[ "$(git -C .deps/os-findmy-e rev-parse HEAD)" == "$UPSTREAM_REV" ]] || { echo 'Unexpected upstream version; stopping.' >&2; exit 1; }
-for patch_name in auth-output.patch cooldown.patch; do
+for patch_name in auth-output.patch machine-state.patch cooldown.patch; do
   if git -C .deps/os-findmy-e apply --check "$PROJECT_ROOT/patches/$patch_name" 2>/dev/null; then
     git -C .deps/os-findmy-e apply "$PROJECT_ROOT/patches/$patch_name"
   elif ! git -C .deps/os-findmy-e apply --reverse --check "$PROJECT_ROOT/patches/$patch_name" 2>/dev/null; then
@@ -22,6 +22,9 @@ for patch_name in auth-output.patch cooldown.patch; do
   fi
 done
 if [[ ! -x .venv/bin/python ]]; then uv venv --python 3.12 .venv; fi
-uv pip install --python .venv/bin/python -r requirements.txt
+.venv/bin/python -c 'import sys; assert sys.version_info[:2] == (3, 12), "This lock requires Python 3.12; use a separate fresh extraction."'
+uv pip install --python .venv/bin/python --require-hashes --only-binary :all: -r requirements-build.lock
+uv pip install --python .venv/bin/python --require-hashes --no-build-isolation -r requirements.lock
+"$PROJECT_ROOT/.venv/bin/python" "$PROJECT_ROOT/host/install_findmy.py"
 "$PROJECT_ROOT/.venv/bin/python" "$PROJECT_ROOT/host/fetch_coreadi.py"
 echo 'Setup complete. Next step: scripts/login.sh'

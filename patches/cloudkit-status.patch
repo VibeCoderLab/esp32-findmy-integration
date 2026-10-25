@@ -1,0 +1,48 @@
+--- a/findmy/cloudkit/client.py
++++ b/findmy/cloudkit/client.py
+@@ -391,7 +391,15 @@
+                 "CloudKit rejected the iCloud token. It has most likely expired;"
+                 " logging in again will obtain a fresh one."
+             )
+-            raise UnauthorizedError(msg)
++            error = UnauthorizedError(msg)
++            error.http_status = 401
++            raise error
++        if resp.status_code == 429:
++            msg = "CloudKit is throttling this account"
++            error = UnhandledProtocolError(msg)
++            error.http_status = 429
++            error.retry_after_header = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
++            raise error
+         if not resp.ok:
+             msg = f"Failed to open CloudKit container: HTTP {resp.status_code}"
+             raise UnhandledProtocolError(msg)
+@@ -517,10 +525,15 @@
+ 
+         if resp.status_code == 401:
+             msg = "CloudKit rejected the token for this operation; log in again"
+-            raise UnauthorizedError(msg)
++            error = UnauthorizedError(msg)
++            error.http_status = 401
++            raise error
+         if resp.status_code == 429:
+             msg = "CloudKit is throttling this account"
+-            raise UnhandledProtocolError(msg)
++            error = UnhandledProtocolError(msg)
++            error.http_status = 429
++            error.retry_after_header = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
++            raise error
+         if resp.status_code == 500 and not resp.text().strip():
+             # An empty 500 is this API's answer to a request that did not parse. There is
+             # no protobuf error to decode and no hint as to the cause; the field numbering
+@@ -541,6 +554,10 @@
+             raise UnhandledProtocolError(msg)
+ 
+         response = responses[0]
++        if (response.result.code == ResultCode.PARTIAL and request.request.type in (
++                OperationType.RECORD_RETRIEVE_CHANGES_TYPE,
++                OperationType.RECORD_SAVE_TYPE, OperationType.RECORD_DELETE_TYPE)):
++            raise UnhandledProtocolError("Incomplete CloudKit record operation; result not accepted")
+         _check_result(response.result)
+         return response
+ 

@@ -1,9 +1,12 @@
 # Troubleshooting
 
-- **Apple HTTP 429:** A five-minute local cooldown blocks further requests after
-  a rate-limit response. There is no automatic login retry; rerun the command
-  manually after the cooldown. Five minutes is a local setting, not a promised
-  server recovery time. Without a `Retry-After` header, Apple's wait time is unknown.
+- **Apple HTTP 429:** GSA login and CloudKit/keychain/report operations use local
+  service guards. A usable Retry-After value is respected; otherwise the local
+  fallback is five minutes. No automatic operation/login retry is performed.
+  Pause metadata is shared per user under `$XDG_STATE_HOME/esp32-findmy`, normally
+  `~/.local/state/esp32-findmy`, rather than inside one extraction. The services
+  have separate guards; they do not establish Apple's actual recovery time.
+  A rollback is deferred on 401/429. Keep any registration journal.
 
 - **Could not resolve host / Apple download failed:** DNS or network access
   failed before Apple login or flashing. The download retries three times;
@@ -25,9 +28,29 @@
 - **Recovery rejected:** Use the selected device's screen-unlock passcode. A wrong
   passcode and a protocol problem may produce the same rejection. Do not guess
   passcode variations. The guard blocks automatic retries. Only after checking
-  the cause and correct passcode, deliberately move `recovery-blocked.json` out
-  of the private state directory and make at most one new manual attempt.
+  the cause and correct passcode, inspect and explicitly release one manual retry:
+
+  ```bash
+  scripts/register.sh recovery-status
+  scripts/register.sh allow-recovery-retry --confirm-one-recovery-retry
+  ```
+
+  These commands are local only and archive the old marker. They do not log in,
+  send a passcode or reset Apple's counters. A request interrupted before its
+  result is known also remains blocked.
   Recovery attempts may be limited.
+- **Incomplete CloudKit snapshot / cleanup_pending:** A missing/repeated continuation
+  token, page limit or partial response is not proof that a record is absent.
+  Do not delete the private journal or start with new IDs. After resolving the
+  connection, pause or expired session, sign in manually if needed and run
+  `scripts/register.sh status`, then `scripts/register.sh remove` to finish
+  targeted cleanup. Unexpected changes to either owned record refuse deletion.
+- **Interrupted machine update / machine busy:** Close other operations using
+  the same machine. An active process owns its lock until exit. If
+  `.store-update.pending` exists, the machine files may be mixed; do not delete
+  that marker to force reuse or overwrite the identity. Restore only a complete,
+  matching machine backup after investigating the interruption. Store counters
+  may already have advanced at Apple, so even a backup is not guaranteed usable.
 - **Missing BeaconStore zone / zone identity:** The default mode generates new
   record envelopes but still needs an existing zone and recoverable keys. It
   does not create a new zone or keychain trust structure.
@@ -49,6 +72,13 @@
   Allow roughly 30 minutes for the first location to appear; longer delays are
   possible. Reports can already be available before the app displays them.
   A key rollover does not force a location report.
+- **Reports exist but Find My shows no location on multiple devices:** Keep the
+  same keys, journal and firmware. Run `scripts/login.sh` manually, then
+  `scripts/diagnose.sh`. It reads a complete CloudKit snapshot, compares only the
+  two owned records against their locally prepared encrypted fields and fetches
+  own reports. It prints comparison flags/timestamps, not IDs, keys, names or
+  coordinates, and performs local logout on exit. Byte equality does not prove
+  client compatibility; native location remains an unpassed functional check.
 - **Already prepared:** Do not overwrite the registration or its keys. Use
   `scripts/register.sh status`, or `remove` when appropriate. Starting with a new
   state directory would create a new identity and could leave earlier records
@@ -56,7 +86,7 @@
 - **Missing firmware key header:** Run `prepare`, then `scripts/build.sh`.
   For an offline build only, generate disposable keys with
   `.venv/bin/python host/key_header.py --demo` and run
-  `uvx --from platformio==6.2.0 pio run -d firmware` directly. Those demo keys are
+  `.venv/bin/python -m platformio run -d firmware` directly. Those demo keys are
   not registered in any account. Delete the generated header afterward.
 - **The item is displayed as AirTag:** This may follow from the known product
   class being used. It does not register your own manufacturer in Apple's catalog.

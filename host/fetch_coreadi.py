@@ -8,7 +8,7 @@ import sys
 from common import UPSTREAM, WorkflowError
 
 
-def verified_download(url, destination, expected, runner=None):
+def verified_download(url, destination, expected, runner=None, label='Apple'):
     runner = runner or subprocess.run
     destination = Path(destination)
     def valid(path):
@@ -26,10 +26,10 @@ def verified_download(url, destination, expected, runner=None):
                 '--retry-delay', '2', '--connect-timeout', '15', '--max-time', '600',
                 '-o', str(pending), url], check=True)
         if not valid(pending):
-            raise WorkflowError('Apple download checksum mismatch; file not accepted. Run setup again.')
+            raise WorkflowError(f'{label} download checksum mismatch; file not accepted. Run setup again.')
         pending.replace(destination)
     except subprocess.CalledProcessError:
-        raise WorkflowError('Apple download failed after retries. Check your internet connection/DNS and rerun the same installation command.') from None
+        raise WorkflowError(f'{label} download failed after retries. Check your internet connection/DNS and rerun the same installation command.') from None
     finally:
         pending.unlink(missing_ok=True)
 

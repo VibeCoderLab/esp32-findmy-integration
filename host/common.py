@@ -19,6 +19,20 @@ def private_directory():
     STATE.chmod(0o700)
     return STATE
 
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def durable_unlink(path):
+    path = Path(path)
+    path.unlink()
+    fsync_directory(path.parent)
+
+
 def write_json(path, value):
     path = Path(path)
     fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', suffix='.tmp', dir=path.parent)
@@ -29,6 +43,7 @@ def write_json(path, value):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(pending, path)
+        fsync_directory(path.parent)
     finally:
         pending.unlink(missing_ok=True)
 

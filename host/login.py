@@ -13,6 +13,8 @@ def validate_machine(machine):
         identity = json.loads((machine / 'identity.json').read_text())
         if not isinstance(identity, dict) or not {'device_id', 'host_uuid', 'local_user_uuid', 'provisioned_at'} <= identity.keys():
             raise ValueError('Incomplete identity')
+        if (machine / '.store-update.pending').exists():
+            raise ValueError('Interrupted machine-state update')
         if not any((machine / 'store').glob('adi-*.pb')):
             raise ValueError('Missing provisioned store')
     except (OSError, ValueError, TypeError):
@@ -52,10 +54,16 @@ def main():
     private_directory()
     if not (UPSTREAM / 'auth_probe.py').exists():
         raise WorkflowError('Run scripts/setup.sh first.')
+    sys.path.insert(0, str(UPSTREAM / 'tools/machoadi'))
+    from cooldown import guard as login_guard
+    login_guard()
     ensure_machine()
     if args.provision_only:
         return 0
     env = os.environ.copy()
+    # The project path is interactive; do not inherit stale account/password overrides.
+    env.pop('APPLE_ID', None)
+    env.pop('APPLE_PASSWORD', None)
     env['FINDMY_DIAGNOSTICS'] = '0'
     command = [sys.executable, str(Path(__file__).with_name('auth_entry.py')),
         str(UPSTREAM / 'auth_probe.py'), '--macadi', str(STATE / 'machine'),

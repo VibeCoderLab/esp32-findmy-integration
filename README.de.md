@@ -1,5 +1,7 @@
 # ESP32 Find My – experimenteller Tracker für Linux
 
+Version **0.1.1**. Siehe [Änderungen](CHANGELOG.md) und [Release Notes](docs/RELEASE-v0.1.1.md).
+
 Eingabeaufforderungen, Fortschrittsmeldungen und Fehler des Projekts sind unabhängig von der Systemsprache auf Englisch. Externe Werkzeuge können eigene Spracheinstellungen verwenden.
 
 [English](README.md)
@@ -101,11 +103,19 @@ Das Skript lädt die festgelegte Version von
 Abhängigkeiten in `.venv/` und bezieht CoreADI über den Upstream-Downloader aus
 Apples iTunes-Download. Der Downloader prüft dessen SHA-256. Apple-Bibliotheken
 werden nicht mit diesem Projekt ausgeliefert. Die Patches unter `patches/`
-passen die Login-Diagnoseausgabe an und setzen die lokale Wartezeit nach
-HTTP 429 auf fünf Minuten. Es gibt keine automatische erneute Anmeldung;
+passen Login-Diagnose, Maschinenzustand und HTTP-Fehlerbehandlung an.
+Python-3.12-Abhängigkeiten und Build-Helfer werden aus Hash-Lockdateien installiert.
+FindMy wird aus einem separat hashgeprüften Commit-Archiv mit geprüfter
+Paketkorrektur gebaut; siehe [Herkunft](THIRD_PARTY.md).
+
+Für Login sowie CloudKit/Schlüsselbund/Standortdienste gibt es lokale Sperren.
+Ohne nutzbare Serverangabe beträgt die Ersatzwartezeit fünf Minuten. Eine
+Serverwartezeit hat Vorrang; es gibt keine automatische Wiederholung oder
+Neuanmeldung. Die Sperrinformationen liegen unter `$XDG_STATE_HOME/esp32-findmy`
+(gewöhnlich `~/.local/state/esp32-findmy`) und gelten auch über Projektkopien hinweg.
 Apples tatsächliche Sperrdauer kann davon abweichen.
 
-Standardmäßig liegen **alle Account-Daten unter `private/`**. Optional vor allen
+Standardmäßig liegen **Zugangsdaten, Trackerzustand und Journale unter `private/`**. Optional vor allen
 Befehlen `ESP32_FINDMY_STATE` auf denselben anderen privaten Ordner setzen.
 Die `.gitignore` schützt diesen beliebigen externen Ordner nicht; niemals seine
 Inhalte in ein Repository kopieren.
@@ -138,7 +148,8 @@ scripts/register.sh prepare --name 'ESP32 Tracker' --emoji '📍'
 Das Apple-Passwort wird erneut nur im Arbeitsspeicher für einen frischen
 Recovery-Token benötigt. Danach das passende eigene Gerät auswählen und dessen
 **Bildschirmsperrcode** eingeben – keinen SMS-Code, keine SIM-PIN. Es erfolgt
-genau ein Versuch, kein automatisches Durchprobieren. Bei einem Fehler bleibt
+genau ein Versuch, kein automatisches Durchprobieren. Bereits vor dem Aufruf wird
+eine Sperre geschrieben. Bei Fehlern oder Abbrüchen bleibt
 `private/recovery-blocked.json` als Sperre bestehen; siehe [Fehlerbehebung](docs/TROUBLESHOOTING.md).
 
 Der Schlüsselbund wird über Recovery gelesen, ohne ein neues Mitglied in den
@@ -165,7 +176,11 @@ scripts/register.sh status
 `apply` erstellt ausschließlich die zwei protokollierten neuen Test-IDs und
 liest sie danach erneut. Bestehende Einträge werden nicht geschrieben. Bei einem
 fehlgeschlagenen Schreibversuch wird die Entfernung der eigenen Teilanlage
-versucht. Das Journal bleibt für eine erneute gezielte Entfernung erhalten.
+versucht. Bei HTTP 401/429 erfolgt kein weiterer automatischer Cloud-Aufruf.
+`cleanup_pending` kennzeichnet unbestätigte Aufräumarbeiten: Journal behalten,
+Sitzungs-/Dienstproblem klären und gezielt `scripts/register.sh remove` starten.
+Unvollständige Cloud-Listen werden als Fehler behandelt und bestätigen weder
+Anlage noch Entfernung.
 
 Jetzt „Wo ist?“ auf iPhone/iPad neu öffnen und den neuen Eintrag prüfen. Name
 und Emoji sollten beim AirTag-Profil bearbeitbar sein; erst die Prüfung in
@@ -184,11 +199,11 @@ hinzufügen und die Sitzung neu starten. Bei vielen Distributionen heißt diese
 Gruppe `dialout`. Port und Flashgröße vor dem Flashen prüfen:
 
 ```bash
-uvx --from esptool==5.6.0 esptool --port /dev/ttyUSB0 flash-id
+.venv/bin/python -m esptool --port /dev/ttyUSB0 flash-id
 umask 077
 mkdir -p private
 chmod 700 private
-uvx --from esptool==5.6.0 esptool --port /dev/ttyUSB0 --baud 460800 read-flash 0 0x400000 private/flash-before.bin
+.venv/bin/python -m esptool --port /dev/ttyUSB0 --baud 460800 read-flash 0 0x400000 private/flash-before.bin
 ```
 
 `0x400000` ist für das getestete **4-MB-Board**. Bei anderen Flashgrößen den Wert
@@ -258,7 +273,7 @@ Die Sicherung des Ein-Befehl-Installers lässt sich auf dasselbe Board
 zurückschreiben (Port entsprechend anpassen):
 
 ```bash
-uvx --from esptool==5.6.0 esptool --port /dev/ttyUSB0 --baud 460800 write-flash 0 private/installer-flash-before.bin
+.venv/bin/python -m esptool --port /dev/ttyUSB0 --baud 460800 write-flash 0 private/installer-flash-before.bin
 ```
 
 Wer die manuelle Sicherung aus Abschnitt 5 verwendet, nimmt stattdessen
@@ -284,3 +299,8 @@ zusätzlich `git diff --cached` prüfen. Die Exportprüfung findet typische
 Geheimnisse, ist aber kein mathematischer Beweis für beliebige spätere Änderungen.
 
 Eigener Code: MIT; Abhängigkeiten und deren Lizenzen: [THIRD_PARTY.md](THIRD_PARTY.md).
+
+Vor dem Praxistest [SECURITY.md](SECURITY.md) und den
+[Funktionsprüfplan](docs/FUNCTIONAL-TEST.md) lesen. Recovery hält zeitweise auch
+Geräteidentität und Schlüssel weiterer Schlüsselbundbereiche im Prozess; die
+Zugangsdaten sind nicht serverseitig auf zwei Tracker-Einträge beschränkt.

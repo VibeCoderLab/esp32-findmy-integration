@@ -6,6 +6,8 @@ from common import STATE, write_json, WorkflowError
 from findmy.cloudkit.constants import OperationType, SaveSemantics
 from findmy.cloudkit.proto import cloudkit_pb2 as ck
 from findmy.cloudkit.client import _encode_varint
+from snapshot import complete_records
+from service_limits import request, error_info, ServicePaused, SessionExpired
 
 def signature(record):
     return (record.record_identifier.value.name, record.type.name,
@@ -47,38 +49,84 @@ def allowed_removal(expected, actual):
     changed = {name for name in old.keys() | new.keys() if old.get(name) != new.get(name)}
     return expected.type.name == 'BeaconNamingRecord' and changed <= {'name', 'emoji'}
 
+class TransactionFailure(WorkflowError):
+    """Retain both causes in memory; show only credential-free classifications."""
+    def __init__(self, original, cleanup):
+        self.original_error = original
+        self.cleanup_error = cleanup
+        super().__init__('Registration failed (' + error_info(original)['type'] +
+            '); cleanup is incomplete (' + error_info(cleanup)['type'] +
+            '). Keep the journal. Review service pauses, sign in manually if needed, then run register.sh remove.')
+
+
+def checkpoint_failure(manifest, primary=None, cleanup=None):
+    manifest['status'] = 'cleanup_pending'
+    if primary is not None:
+        manifest['primary_error'] = error_info(primary)
+    if cleanup is not None:
+        manifest['cleanup_error'] = error_info(cleanup)
+    write_json(STATE / 'registration.json', manifest)
+
+
 async def remove(store):
     manifest, records = load()
-    for expected in reversed(records):
-        ident = expected.record_identifier.value.name
-        if ident not in manifest['creation_attempted']:
-            continue
-        current = {r.name: r for r in await store.fetch_records()}
-        if ident not in current:
-            continue
-        record = current[ident].source
-        if not allowed_removal(expected, record):
-            raise WorkflowError('Test record changed unexpectedly; removal refused.')
-        await store.client._post_operation('/api/client/record/delete', delete_request(store.client, record))
-        if ident in {r.name for r in await store.fetch_records()}:
-            raise WorkflowError('Removal not confirmed.')
-    manifest['status'] = 'removed'
+    manifest['status'] = 'cleanup_in_progress'
     write_json(STATE / 'registration.json', manifest)
-    print('Registered test records for this installation were removed or are already absent.')
+    try:
+        current = {r.name: r for r in await complete_records(store)}
+        # Check the entire owned pair before deleting either half.
+        for expected in records:
+            ident = expected.record_identifier.value.name
+            if ident in manifest['creation_attempted'] and ident in current:
+                if not allowed_removal(expected, current[ident].source):
+                    raise WorkflowError('Test record changed unexpectedly; removal refused.')
+        for expected in reversed(records):
+            ident = expected.record_identifier.value.name
+            if ident not in manifest['creation_attempted']:
+                continue
+            current = {r.name: r for r in await complete_records(store)}
+            if ident in current:
+                record = current[ident].source
+                if not allowed_removal(expected, record):
+                    raise WorkflowError('Test record changed unexpectedly; removal refused.')
+                await request('cloudkit', lambda: store.client._post_operation(
+                    '/api/client/record/delete', delete_request(store.client, record)))
+                if ident in {r.name for r in await complete_records(store)}:
+                    raise WorkflowError('Removal not confirmed.')
+            verified = manifest.setdefault('removal_verified', [])
+            if ident not in verified:
+                verified.append(ident)
+            write_json(STATE / 'registration.json', manifest)
+        final = {r.name for r in await complete_records(store)}
+        if set(manifest['creation_attempted']) & final:
+            raise WorkflowError('Removal not confirmed by a complete final snapshot.')
+        manifest['status'] = 'removed'
+        manifest.pop('cleanup_error', None)
+        manifest.pop('cleanup_deferred', None)
+        write_json(STATE / 'registration.json', manifest)
+        print('Registered test records removed or confirmed absent in a complete snapshot.')
+    except BaseException as error:
+        try:
+            checkpoint_failure(manifest, cleanup=error)
+        except OSError as journal_error:
+            raise TransactionFailure(error, journal_error) from None
+        raise
+
 
 async def apply(store):
     manifest, records = load()
-    before = {r.name: r for r in await store.fetch_records()}
+    before = {r.name: r for r in await complete_records(store)}
     if manifest['creation_attempted'] or any(ident in before for ident in manifest['ids']):
         raise WorkflowError('Registration already attempted. No duplicate records created; use status/remove.')
-    zone_tag = await store._zone_protection_tag()
+    zone_tag = await request('cloudkit', lambda: store._zone_protection_tag())
     try:
         for record, ident in zip(records, manifest['ids']):
             manifest['creation_attempted'].append(ident)
+            manifest['status'] = 'creation_in_progress'
             write_json(STATE / 'registration.json', manifest)
-            await store.client.record_save(record, record_protection_info_tag='',
-                zone_protection_info_tag=zone_tag, semantics=SaveSemantics.CREATE)
-            after = {r.name: r for r in await store.fetch_records()}
+            await request('cloudkit', lambda: store.client.record_save(record, record_protection_info_tag='',
+                zone_protection_info_tag=zone_tag, semantics=SaveSemantics.CREATE))
+            after = {r.name: r for r in await complete_records(store)}
             if ident not in after or signature(after[ident].source) != signature(record):
                 raise WorkflowError('New record did not match when read back.')
         if any(ident not in after or signature(record.source) != signature(after[ident].source)
@@ -86,7 +134,22 @@ async def apply(store):
             raise WorkflowError('Existing records changed during the test.')
         manifest['status'] = 'created_verified'
         write_json(STATE / 'registration.json', manifest)
-        print('Created and read back two new records for this installation. Previous records unchanged.')
-    except BaseException:
-        await remove(store)
+        print('Created and read back two new records. Complete snapshots verified the existing baseline.')
+    except BaseException as original:
+        try:
+            checkpoint_failure(manifest, primary=original)
+        except OSError as journal_error:
+            raise TransactionFailure(original, journal_error) from None
+        # Authentication failures and throttling cannot be repaired by another request.
+        if isinstance(original, (ServicePaused, SessionExpired)):
+            manifest['cleanup_deferred'] = error_info(original)['type']
+            try:
+                write_json(STATE / 'registration.json', manifest)
+            except OSError as journal_error:
+                raise TransactionFailure(original, journal_error) from None
+            raise TransactionFailure(original, original) from None
+        try:
+            await remove(store)
+        except BaseException as cleanup:
+            raise TransactionFailure(original, cleanup) from None
         raise

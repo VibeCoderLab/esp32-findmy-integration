@@ -1,12 +1,29 @@
-diff --git a/tools/machoadi/cooldown.py b/tools/machoadi/cooldown.py
 --- a/tools/machoadi/cooldown.py
 +++ b/tools/machoadi/cooldown.py
-@@ -17,7 +17,7 @@ import time
+@@ -11,11 +11,13 @@
+ from __future__ import annotations
+ 
+ import sys
++import os
++from atomic_state import atomic_write
+ import time
  from pathlib import Path
  
- MARKER = Path("/tmp/macadi/gsa-429")
+-MARKER = Path("/tmp/macadi/gsa-429")
 -COOLDOWN_MINUTES = 45  # shorter than Apple's own "an hour" advice; chosen by the user.
-+COOLDOWN_MINUTES = 5  # Local retry guard; Apple's actual rate-limit duration is unknown.
++MARKER = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "esp32-findmy" / "gsa-429"
++COOLDOWN_MINUTES = 5  # Local fallback guard, not a statement about Apple's actual wait time.
  
  
  class Throttled(RuntimeError):
+@@ -30,8 +32,8 @@
+ 
+ 
+ def note_429(at: float | None = None) -> None:
+-    MARKER.parent.mkdir(parents=True, exist_ok=True)
+-    MARKER.write_text(f"{at if at is not None else time.time():.0f}\n")
++    MARKER.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
++    atomic_write(MARKER, f"{at if at is not None else time.time():.0f}\n".encode())
+ 
+ 
+ def remaining(now: float | None = None) -> float:
